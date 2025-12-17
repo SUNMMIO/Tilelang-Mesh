@@ -106,6 +106,8 @@ from .annotations import (  # noqa: F401
 
 from .annotate_mesh_tensor import mesh_tensor_functions  # noqa: F401
 
+from .dma import dma_load, dma_store  # noqa: F401
+
 def import_source(source: str | None = None):
     # source is the source code to be imported
     return block_attr({"pragma_import_c": source}) if source is not None else None
