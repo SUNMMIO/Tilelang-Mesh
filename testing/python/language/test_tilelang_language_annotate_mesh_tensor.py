@@ -76,12 +76,9 @@ def main(A_handle: T.handle, B_handle: T.handle, C_handle: T.handle):
     B_1 = T.match_buffer(B_handle, (64, 1024, 1024), "float16", data=B, strides=(1048576, 1024, 1))
     C_1 = T.match_buffer(C_handle, (64, 1024, 1024), "float16", data=C, strides=(1048576, 1024, 1))
     # with T.block("root"):
-    tile_batch: T.int32 = 16
-    tile_M: T.int32 = 256
-    tile_N: T.int32 = 1024
-    bx = T.launch_thread("blockIdx.x", tile_N)
-    by = T.launch_thread("blockIdx.y", tile_M)
-    bz = T.launch_thread("blockIdx.z", tile_batch)
+    bx = T.launch_thread("blockIdx.x", 1024)
+    by = T.launch_thread("blockIdx.y", 256)
+    bz = T.launch_thread("blockIdx.z", 16)
     tx = T.launch_thread("threadIdx.x", 128)
     ty = T.launch_thread("threadIdx.y", 1)
     tz = T.launch_thread("threadIdx.z", 1)
@@ -106,3 +103,4 @@ def main(A_handle: T.handle, B_handle: T.handle, C_handle: T.handle):
 
 if __name__ == "__main__":
     tilelang.testing.main()
+    # test_frontend()
