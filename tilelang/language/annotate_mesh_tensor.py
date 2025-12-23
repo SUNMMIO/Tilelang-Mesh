@@ -1,5 +1,5 @@
 from copy import deepcopy
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Literal
 
 from tvm import tir
 import tilelang.language as T
@@ -12,7 +12,30 @@ per-tile shapes and performing copy operations between mesh tiles.
 """
 
 
-def mesh_tensor_functions(mesh_shape: dict[str, int]) -> Dict[str, Callable]:
+def get_target_mesh_shape(target: str = "auto") -> dict[str, int]:
+    """Get the shape of the target mesh as a dictionary with 'x' and 'y' keys.
+    Args:
+        target: The target mesh type. Supported values are
+            'a4e', 'a4e-lite', and 'auto'. If 'auto' is specified,
+            the function defaults to 'a4e'.
+    Returns:
+        A dictionary with integer keys 'x' and 'y' representing
+        the 2D mesh size in each dimension.
+    Raises:
+        ValueError: If an unknown target is specified.
+    """
+    if target == "auto":
+        target = "a4e"
+
+    if target == "a4e":
+        return {"x": 4, "y": 4}
+    elif target == "a4e-lite":
+        return {"x": 2, "y": 4}
+    else:
+        raise ValueError(f"Unknown target: {target}")
+
+
+def mesh_tensor_functions(mesh_shape: dict[str, int]) -> dict[str, Callable]:
     """Create mesh-tensor helper functions for a given mesh shape.
 
     This factory returns a dictionary with three helpers:
@@ -32,11 +55,57 @@ def mesh_tensor_functions(mesh_shape: dict[str, int]) -> Dict[str, Callable]:
     """
 
     # Internal storage for mesh-tensor metadata; keyed by buffer.data
-    _mesh_tensor_info: Dict = {}
+    _mesh_tensor_info = {}
     if isinstance(mesh_shape, dict) and "x" in mesh_shape and "y" in mesh_shape:
         _mesh_shape = deepcopy(mesh_shape)
     else:
         raise ValueError("mesh_shape must be a dict with 'x' and 'y' keys.")
+
+    def init_mesh_tensor_info(
+        sharding: dict[str, int] | tuple[int, int],
+        block_shape: tuple[int, ...],
+        program_id: int | tuple[int, int] | None = None,
+        order: Literal["block_wise", "row_major"] = "block_wise",
+    ):
+        """Initialize a mesh tensor metadata dictionary.
+        Args:
+            sharding: A dict or tuple specifying which tensor dimensions
+                are sharded across the mesh in the 'x' and 'y' dimensions.
+            block_shape: A tuple specifying the shape of each tile/block.
+            program_id: The core id (int) or (row, col) tuple of the
+                program owning this mesh tensor. If None, uses current core.
+            order: The memory layout order for the mesh tensor.
+        Returns:
+            A dict containing the mesh tensor metadata.
+        Raises:
+            ValueError: If `sharding` or `program_id` are malformed.
+        """
+        if isinstance(sharding, dict):
+            if "x" not in sharding or "y" not in sharding:
+                raise ValueError("sharding dict must contain 'x' and 'y' keys.")
+        elif isinstance(sharding, tuple):
+            if len(sharding) != 2:
+                raise ValueError("sharding tuple must have exactly two elements.")
+            sharding = {"x": sharding[0], "y": sharding[1]}
+        else:
+            raise ValueError("sharding must be either a dict or a tuple.")
+        if program_id is None:
+            program_id = T.comm.current_core()
+        elif isinstance(program_id, tuple):
+            if len(program_id) != 2:
+                raise ValueError("program_id tuple must have exactly two elements.")
+            program_id = T.comm.CoreId(program_id)
+        elif isinstance(program_id, int):
+            program_id = T.comm.CoreId(program_id)
+        else:
+            raise ValueError("program_id must be either an int, a tuple, or None.")
+
+        return {
+            "sharding": sharding,
+            "block_shape": block_shape,
+            "program_id": program_id,
+            "order": order,
+        }
 
     def annotate_mesh_tensor_info(mesh_tensor_info: dict[tir.Buffer, dict]) -> Callable:
         """Annotate buffers with mesh tensor metadata.
@@ -44,7 +113,7 @@ def mesh_tensor_functions(mesh_shape: dict[str, int]) -> Dict[str, Callable]:
         Args:
             mesh_tensor_info: Mapping from `tir.Buffer` -> metadata dict.
 
-            The expected input maps buffer objects to info dicts containing 
+            The expected input maps buffer objects to info dicts containing
             at least 'block_shape', 'program_id', and 'sharding'.
 
         Example:
@@ -87,7 +156,7 @@ def mesh_tensor_functions(mesh_shape: dict[str, int]) -> Dict[str, Callable]:
 
         return T.func_attr({"mesh_tensor_info": _mesh_tensor_info})
 
-    def get_tile_shape(buffer: tir.Buffer) -> Tuple[int, ...]:
+    def get_tile_shape(buffer: tir.Buffer) -> tuple[int, ...]:
         """Compute the per-tile shape for a given buffer.
 
         This uses stored mesh tensor metadata (sharding) to determine which
@@ -124,8 +193,8 @@ def mesh_tensor_functions(mesh_shape: dict[str, int]) -> Dict[str, Callable]:
         src: tir.Buffer,
         dst: tir.Buffer,
         *,
-        src_coord: Optional[Tuple[int, ...]] = None,
-        dst_coord: Optional[Tuple[int, ...]] = None,
+        src_coord: tuple[int, ...] | None = None,
+        dst_coord: tuple[int, ...] | None = None,
     ):
         """Copy data between mesh tensor tiles.
 
@@ -136,8 +205,8 @@ def mesh_tensor_functions(mesh_shape: dict[str, int]) -> Dict[str, Callable]:
         Args:
             src: Source buffer (may be a full tensor or a sliced view).
             dst: Destination buffer.
-            src_coord: Optional tile coordinates for the source.
-            dst_coord: Optional tile coordinates for the destination.
+            src_coord: Optional tile coordinates for the source buffer.
+            dst_coord: Optional tile coordinates for the destination buffer.
 
         Returns:
             The result of `T.copy(src, dst)` which describes the copy
@@ -177,4 +246,5 @@ def mesh_tensor_functions(mesh_shape: dict[str, int]) -> Dict[str, Callable]:
         "annotate_mesh_tensor_info": annotate_mesh_tensor_info,
         "mesh_tensor_copy": mesh_tensor_copy,
         "get_tile_shape": get_tile_shape,
+        "init_mesh_tensor_info": init_mesh_tensor_info,
     }

@@ -104,7 +104,8 @@ from .annotations import (  # noqa: F401
     use_swizzle, annotate_layout, annotate_safe_value, annotate_l2_hit_ratio,
 )
 
-from .annotate_mesh_tensor import mesh_tensor_functions  # noqa: F401
+from .annotate_mesh_tensor import mesh_tensor_functions, get_target_mesh_shape  # noqa: F401
+from . import comm  # noqa: F401
 
 def import_source(source: str | None = None):
     # source is the source code to be imported
