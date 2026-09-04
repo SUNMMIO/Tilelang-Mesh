@@ -126,3 +126,5 @@ maint/host_checks/logs/*
 
 # trae
 /.trae
+
+/new_tmp
