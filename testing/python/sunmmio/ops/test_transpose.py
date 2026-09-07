@@ -7,6 +7,7 @@ import tilelang.language as T
 import tilelang.utils.target as target_utils
 from testing.python.sunmmio.common.compile_pipeline import target
 from testing.python.sunmmio.common.codegen_validation import (
+    find_async_op_lines,
     lower_sunmmio_kernel_to_device_tir,
     validate_sunmmio_codegen_with_npuir_opt,
 )
@@ -162,7 +163,9 @@ def test_transpose_codegen_matrix(
         ),
     )
 
-    assert src.count("suvm.transpose_async") == 1
+    transpose_lines = find_async_op_lines(src, "suvm.transpose_async")
+    assert len(transpose_lines) == 1
+    assert "#suvm.unit<odma1>" in transpose_lines[0]
 
 
 @pytest.mark.parametrize("enable_region_validation", [True, False], ids=["region_validation_on", "region_validation_off"])
@@ -192,7 +195,9 @@ def test_transpose_loop_codegen(
         ),
     )
 
-    assert src.count("suvm.transpose_async") == 2
+    transpose_lines = find_async_op_lines(src, "suvm.transpose_async")
+    assert len(transpose_lines) == 2
+    assert all("#suvm.unit<odma1>" in line for line in transpose_lines)
 
 
 @pytest.mark.parametrize(
@@ -215,7 +220,9 @@ def test_transpose_layout_inference_is_order_independent(
         ),
     )
 
-    assert src.count("suvm.transpose_async") == 2
+    transpose_lines = find_async_op_lines(src, "suvm.transpose_async")
+    assert len(transpose_lines) == 2
+    assert all("#suvm.unit<odma1>" in line for line in transpose_lines)
 
 
 def test_transpose_rejects_vector_element_dtype():

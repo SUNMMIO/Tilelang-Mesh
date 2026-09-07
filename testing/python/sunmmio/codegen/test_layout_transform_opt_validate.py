@@ -8,6 +8,7 @@ from tilelang.layout import make_row_major, make_zz_layout
 from testing.python.sunmmio.common.compile_pipeline import target
 from testing.python.sunmmio.common.codegen_validation import (
     assert_source_contains,
+    find_async_op_lines,
     validate_sunmmio_codegen_with_npuir_opt,
 )
 
@@ -54,7 +55,9 @@ def test_layout_transform_codegen_validates_with_npuir_opt(tmp_path):
         ),
     )
     assert_source_contains(src, ("!suvm.token", "suvm.get_partitioned_tile_view"))
-    assert src.count("suvm.transform_layout_async") >= 2
+    transform_lines = find_async_op_lines(src, "suvm.transform_layout_async")
+    assert len(transform_lines) >= 2
+    assert all("#suvm.unit<odma1>" in line for line in transform_lines)
     assert "sunmmio.fake" not in src
 
 
