@@ -253,6 +253,20 @@ def multiple_sender_one_signal_kernel_factory(world_size: int = 1):
     return main
 
 
+@tilelang.jit(target="sunmmio")
+def multiple_sender_value_signal_kernel_factory(world_size: int = 1):
+    @T.prim_func
+    def main(rank_id: T.dist.RankId):
+        with T.Kernel():
+            src = T.alloc_shared((32,), T.bfloat16)
+            dst = T.alloc_shared((32,), T.bfloat16)
+            signal = T.dist.signal(kind=T.dist.SignalKind.SRAM_FLAGREG_VALUE)
+            T.dist.put(src, dst, dst_rank=0, signal=signal)
+            T.dist.wait_signal(signal, dst=dst)
+
+    return main
+
+
 def _op_names(mod):
     names = []
 
@@ -418,7 +432,20 @@ def test_explicit_route_rejects_invalid_endpoints_and_duplicates(routes, message
         lower_to_device_tir(func)
 
 
-def test_one_signal_rejects_multiple_physical_senders():
+def test_auto_signal_uses_inc_for_multiple_physical_senders():
     func = multiple_sender_one_signal_kernel_factory.get_tir(world_size=4)
+    result = lower_to_device_tir(
+        func,
+        capture_passes=("tl.PlanDistSignals", "tl.LowerDistCommunication"),
+    )
+    planned = result.pass_snapshot("tl.PlanDistSignals").mod["main"]
+    assert int(planned.attrs["tl.dist.signal_counts"]["sram_flagreg_inc"]) == 1
+    lowered = result.pass_snapshot("tl.LowerDistCommunication").mod
+    assert _op_names(lowered).count("tl.dist_expect_") == 1
+    assert '"sram_flagreg_inc", 0' in lowered.script()
+
+
+def test_value_signal_rejects_multiple_physical_senders():
+    func = multiple_sender_value_signal_kernel_factory.get_tir(world_size=4)
     with pytest.raises(tvm.error.InternalError, match="multiple physical senders"):
         lower_to_device_tir(func)

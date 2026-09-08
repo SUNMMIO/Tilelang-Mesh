@@ -291,6 +291,7 @@ def test_explicit_memory_signal_reaches_stable_leaf_tir():
     assert "T.dist_put_(" in script
     assert ', "sram_memory", 0, signal_generation_1[0])' in script
     assert 'T.dist_wait_signal_("sram_memory", 0, signal_expect_1[0]' in script
+    assert "uint32" in script
 
 
 def test_signal_rejects_more_than_eight_sram_flagregs():
@@ -310,9 +311,9 @@ def test_signal_generation_is_reused_across_serial_loop():
     assert op_names.count("tl.dist_wait_signal_") == 1
     assert op_names.count("tl.dist_wait_send") == 1
     assert "for _step in range(2):" in script
-    assert "signal_expect_1[0] = signal_expect_1[0] + T.uint8(1)" in script
-    assert "signal_generation_1[0] = signal_generation_1[0] + T.uint8(1)" in script
-    assert 'T.dist_wait_signal_("sram_flagreg_inc", 0, signal_expect_1[0]' in script
+    assert "signal_expect_1[0] = signal_expect_1[0] + T.uint32(1)" in script
+    assert "signal_generation_1[0] = signal_generation_1[0] + T.uint32(1)" in script
+    assert 'T.dist_wait_signal_("sram_flagreg_value", 0, signal_expect_1[0]' in script
 
 
 def test_put_advances_generation_and_wait_only_reads_it():
@@ -320,10 +321,10 @@ def test_put_advances_generation_and_wait_only_reads_it():
     device_func = _single_device_func(lower_to_device_tir(func).device_mod)
     script = device_func.script()
 
-    assert script.count("signal_expect_1[0] = signal_expect_1[0] + T.uint8(1)") == 2
-    assert script.count("signal_generation_1[0] = signal_generation_1[0] + T.uint8(1)") == 2
+    assert script.count("signal_expect_1[0] = signal_expect_1[0] + T.uint32(1)") == 2
+    assert script.count("signal_generation_1[0] = signal_generation_1[0] + T.uint32(1)") == 2
     assert script.count("T.dist_put_(") == 2
-    assert script.count('T.dist_wait_signal_("sram_flagreg_inc", 0, signal_expect_1[0]') == 2
+    assert script.count('T.dist_wait_signal_("sram_flagreg_value", 0, signal_expect_1[0]') == 2
 
     lines = [line.strip() for line in script.splitlines()]
     advance_indices = [index for index, line in enumerate(lines) if line.startswith("signal_generation_1[0] =")]

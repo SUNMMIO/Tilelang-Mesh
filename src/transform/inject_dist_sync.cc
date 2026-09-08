@@ -6,6 +6,8 @@
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/transform.h>
 
+#include <optional>
+
 #include "dist_transform_utils.h"
 
 namespace tvm {
@@ -38,9 +40,12 @@ private:
       ICHECK_EQ(call->args.size(), 6U)
           << "tl.dist_put_ must have its stable peer signature before "
              "InjectDistSync";
-      BufferLoad generation = RequireLocalState(call->args[5], "generation");
+      const DistSignalKindInfo &kind =
+          RequireDistSignalKindInfo(call->args[3], "signal kind");
+      BufferLoad generation =
+          RequireLocalState(call->args[5], "generation", kind.state_dtype);
       PrimExpr next =
-          Cast(DataType::UInt(8), generation + IntImm(DataType::UInt(8), 1));
+          Cast(kind.state_dtype, generation + IntImm(kind.state_dtype, 1));
       Stmt advance = BufferStore(generation->buffer, next, generation->indices);
       return SeqStmt::Flatten(
           Array<Stmt>{advance, tvm::ffi::GetRef<Stmt>(evaluate_node)});
@@ -48,19 +53,28 @@ private:
     if (call->op.same_as(dist_expect_())) {
       ICHECK_EQ(call->args.size(), 2U);
       BufferLoad expected = RequireLocalState(call->args[0], "expected");
-      PrimExpr delta = Cast(DataType::UInt(8), call->args[1]);
-      PrimExpr next = Cast(DataType::UInt(8), expected + delta);
+      DataType dtype = expected->dtype;
+      PrimExpr delta = Cast(dtype, call->args[1]);
+      PrimExpr next = Cast(dtype, expected + delta);
       return BufferStore(expected->buffer, next, expected->indices);
     }
     return StmtExprMutator::VisitStmt_(evaluate_node);
   }
 
-  BufferLoad RequireLocalState(const PrimExpr &expr, const char *name) {
+  BufferLoad
+  RequireLocalState(const PrimExpr &expr, const char *name,
+                    std::optional<DataType> expected_dtype = std::nullopt) {
     const auto *load = expr.as<BufferLoadNode>();
     ICHECK(load) << "T.dist " << name << " state must be a BufferLoad, got "
                  << expr;
-    ICHECK(load->dtype.is_uint() && load->dtype.bits() == 8)
-        << "T.dist " << name << " state must have uint8 dtype";
+    ICHECK(load->dtype.is_uint() &&
+           (load->dtype.bits() == 8 || load->dtype.bits() == 32))
+        << "T.dist " << name << " state must have uint8 or uint32 dtype";
+    if (expected_dtype) {
+      ICHECK(load->dtype == expected_dtype.value())
+          << "T.dist " << name << " state dtype must match its signal kind: "
+          << expected_dtype.value() << ", got " << load->dtype;
+    }
     return tvm::ffi::GetRef<BufferLoad>(load);
   }
 };
