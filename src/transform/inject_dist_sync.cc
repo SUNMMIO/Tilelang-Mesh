@@ -39,8 +39,8 @@ private:
           << "tl.dist_put_ must have its stable peer signature before "
              "InjectDistSync";
       BufferLoad generation = RequireLocalState(call->args[5], "generation");
-      PrimExpr next =
-          Cast(DataType::UInt(8), generation + IntImm(DataType::UInt(8), 1));
+      DataType dtype = generation->dtype;
+      PrimExpr next = Cast(dtype, generation + IntImm(dtype, 1));
       Stmt advance = BufferStore(generation->buffer, next, generation->indices);
       return SeqStmt::Flatten(
           Array<Stmt>{advance, tvm::ffi::GetRef<Stmt>(evaluate_node)});
@@ -48,8 +48,10 @@ private:
     if (call->op.same_as(dist_expect_())) {
       ICHECK_EQ(call->args.size(), 2U);
       BufferLoad expected = RequireLocalState(call->args[0], "expected");
-      PrimExpr delta = Cast(DataType::UInt(8), call->args[1]);
-      PrimExpr next = Cast(DataType::UInt(8), expected + delta);
+
+      DataType dtype = expected->dtype;
+      PrimExpr delta = Cast(dtype, call->args[1]);
+      PrimExpr next = Cast(dtype, expected + delta);
       return BufferStore(expected->buffer, next, expected->indices);
     }
     return StmtExprMutator::VisitStmt_(evaluate_node);
@@ -59,8 +61,10 @@ private:
     const auto *load = expr.as<BufferLoadNode>();
     ICHECK(load) << "T.dist " << name << " state must be a BufferLoad, got "
                  << expr;
-    ICHECK(load->dtype.is_uint() && load->dtype.bits() == 8)
-        << "T.dist " << name << " state must have uint8 dtype";
+
+    ICHECK(load->dtype.is_uint() && load->dtype.is_scalar() &&
+           (load->dtype.bits() == 8 || load->dtype.bits() == 32))
+        << "T.dist " << name << " state must have uint8 or uint32 dtype";
     return tvm::ffi::GetRef<BufferLoad>(load);
   }
 };
