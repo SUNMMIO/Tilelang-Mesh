@@ -236,6 +236,15 @@ def verify_comm_lower(func: tir.PrimFunc):
     def check(mod: IRModule):
         script = mod.script()
         broadcast_arg_lists = [args for line in script.splitlines() if (args := broadcast_call_args(line.strip())) is not None]
+
+        def strip_broadcast_metadata(args):
+            fixed_args = list(args)
+            if fixed_args and fixed_args[-1].startswith("T.sync_token_id("):
+                fixed_args.pop()
+            if fixed_args and fixed_args[-1].startswith("T.odma_unit("):
+                fixed_args.pop()
+            return fixed_args
+
         for core, direction, mask, has_src_core in expected_broadcasts:
             if mask is None:
                 mask_pattern = r".*?"
@@ -249,11 +258,8 @@ def verify_comm_lower(func: tir.PrimFunc):
                     message = f"Expected broadcast_ with a dynamic source core, direction={direction}, mask={mask} not found in IRModule"
                     found = False
                     for args in broadcast_arg_lists:
-                        if len(args) == 6:
-                            fixed_args = args
-                        elif len(args) == 7 and args[-1].startswith("T.sync_token_id("):
-                            fixed_args = args[:-1]
-                        else:
+                        fixed_args = strip_broadcast_metadata(args)
+                        if len(fixed_args) != 6:
                             continue
                         if fixed_args[2] != str(direction):
                             continue
@@ -270,15 +276,13 @@ def verify_comm_lower(func: tir.PrimFunc):
                 message = f"Expected broadcast_ with core={core}, direction={direction}, mask={mask} not found in IRModule"
             else:
                 # Match the dynamic allgather form without src_core:
-                # T.broadcast_(src_region, dst_region, direction, mask, src_offset_byte[, sync_token_id])
+                # T.broadcast_(src_region, dst_region, direction, mask,
+                #              src_offset_byte[, odma_unit][, sync_token_id])
                 message = f"Expected broadcast_ without src_core, direction={direction}, mask={mask} not found in IRModule"
                 found = False
                 for args in broadcast_arg_lists:
-                    if len(args) == 5:
-                        fixed_args = args
-                    elif len(args) == 6 and args[-1].startswith("T.sync_token_id("):
-                        fixed_args = args[:-1]
-                    else:
+                    fixed_args = strip_broadcast_metadata(args)
+                    if len(fixed_args) != 5:
                         continue
                     if fixed_args[2] != str(direction):
                         continue

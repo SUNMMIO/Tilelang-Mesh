@@ -489,6 +489,10 @@ bool BroadcastCallHasSrcCore(const CallNode *call) {
   if (non_token_args > 0 && IsSyncTokenExpr(call->args.back())) {
     --non_token_args;
   }
+  if (non_token_args > 0 &&
+      ParseSunmmioOdmaUnitExpr(call->args[non_token_args - 1])) {
+    --non_token_args;
+  }
   ICHECK(non_token_args == static_cast<size_t>(kBroadcastArgCount) ||
          non_token_args == static_cast<size_t>(kBroadcastArgCount + 1))
       << "broadcast_() expects fixed args plus optional src_core, got "
@@ -501,6 +505,9 @@ PrimExpr GetBroadcastSrcCore(const CallNode *call) {
       << "broadcast_() call does not carry optional src_core.";
   size_t non_token_args = call->args.size();
   if (IsSyncTokenExpr(call->args.back())) {
+    --non_token_args;
+  }
+  if (ParseSunmmioOdmaUnitExpr(call->args[non_token_args - 1])) {
     --non_token_args;
   }
   return call->args[non_token_args - 1];
@@ -1614,8 +1621,9 @@ private:
 
   // Computes the global participant core mask for a broadcast operation.
   // tl.broadcast_ uses args = [src_region, dst_region, direction, mask,
-  // src_offset_byte, optional src_core, optional sync_token_id]. The optional
-  // src_core is immediately before sync_token_id when the token is present.
+  // src_offset_byte, optional src_core, optional odma_unit, optional
+  // sync_token_id]. Metadata arguments are appended after the optional
+  // src_core.
   // The broadcast mask is direction-local; barriers still use global core ids.
   PrimExpr BroadcastParticipantMask(const CallNode *call) {
     ICHECK_GE(call->args.size(), static_cast<size_t>(kBroadcastArgCount))

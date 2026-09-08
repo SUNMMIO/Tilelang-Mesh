@@ -31,6 +31,7 @@ using SunMMIOCallAttrs = std::unordered_map<std::string, SunMMIOCallAttrValue>;
 
 namespace SunMMIOCallAttrKey {
 constexpr const char *kTokenId = "token_id";
+constexpr const char *kUnit = "unit";
 constexpr const char *kDirection = "direction";
 constexpr const char *kTransA = "trans_a";
 constexpr const char *kTransB = "trans_b";
@@ -420,6 +421,8 @@ private:
   tir::BufferRegion NormalizeRegionTracked(const tvm::PrimExpr &expr);
   bool TryConsumeSyncTokenId(const tvm::PrimExpr &expr,
                              SunMMIOCallAttrs *attrs);
+  bool TryConsumeSunmmioOdmaUnit(const tvm::PrimExpr &expr,
+                                 SunMMIOCallAttrs *attrs);
   void WriteCoverageReport() const;
   void CheckCoverageOrFail() const;
   SunMMIOValue EmitBinary(const char *op_name, const tvm::PrimExpr &lhs,

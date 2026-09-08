@@ -27,15 +27,22 @@ def _primfunc_from_stmt(stmt, params=None, name="main"):
     return _to_device_kernel_func(tvm.tir.PrimFunc(params, stmt)).with_attr("global_symbol", name)
 
 
+def _resolve_transfer_units(mod, target):
+    mod = tvm.tir.transform.BindTarget(target)(mod)
+    return tilelang.transform.ResolveSunmmioUnit()(mod)
+
+
 def _build_sunmmio_source_from_stmt(stmt, params=None):
     target = determine_target("Sunmmio", return_object=True)
     mod = tvm.IRModule({"main": _primfunc_from_stmt(stmt, params=params)})
+    mod = _resolve_transfer_units(mod, target)
     builder = tvm.ffi.get_global_func("target.build.tilelang_sunmmio_without_compile")
     return mod, builder(mod, target, "suvm").inspect_source()
 
 
 def _build_sunmmio_source_from_module(mod):
     target = determine_target("Sunmmio", return_object=True)
+    mod = _resolve_transfer_units(mod, target)
     builder = tvm.ffi.get_global_func("target.build.tilelang_sunmmio_without_compile")
     return builder(mod, target, "suvm").inspect_source()
 

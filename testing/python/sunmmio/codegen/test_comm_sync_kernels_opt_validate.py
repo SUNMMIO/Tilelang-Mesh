@@ -7,6 +7,7 @@ import tilelang.testing
 
 from testing.python.sunmmio.common.compile_pipeline import target
 from testing.python.sunmmio.common.codegen_validation import (
+    find_async_op_lines,
     validate_sunmmio_codegen_with_npuir_opt,
 )
 
@@ -209,7 +210,8 @@ def test_comm_broadcast_kernel_codegen_validates_with_npuir_opt(tmp_path):
         ),
     )
 
-    assert src.count("suvm.mcast_tok") >= 1
+    mcast_lines = find_async_op_lines(src, "suvm.mcast_tok")
+    assert all("#suvm.unit<odma1>" in line for line in mcast_lines)
 
 
 def test_comm_put_kernel_codegen_validates_with_npuir_opt(tmp_path):
@@ -245,7 +247,12 @@ def test_comm_all_gather_kernel_codegen_validates_with_npuir_opt(
         expected_tokens=("suvm.copy_async", "suvm.mcast_tok"),
     )
 
-    assert src.count("suvm.mcast_tok") >= min_mcast_count
+    mcast_lines = find_async_op_lines(src, "suvm.mcast_tok")
+    assert len(mcast_lines) >= min_mcast_count
+    for line in mcast_lines:
+        direction = line.split("direction =", 1)[1].lstrip()
+        expected_unit = "odma1" if direction.startswith("row") else "odma0"
+        assert f"#suvm.unit<{expected_unit}>" in line
 
 
 def test_sync_simple_copy_kernel_codegen_validates_with_npuir_opt(tmp_path):
@@ -256,7 +263,9 @@ def test_sync_simple_copy_kernel_codegen_validates_with_npuir_opt(tmp_path):
         expected_tokens=("suvm.copy_async", "suvm.wait_token"),
     )
 
-    assert src.count("suvm.copy_async") >= 2
+    copy_lines = find_async_op_lines(src, "suvm.copy_async")
+    assert len(copy_lines) >= 2
+    assert all("#suvm.unit<odma0>" in line for line in copy_lines)
 
 
 def test_sync_mma_kernel_codegen_validates_with_npuir_opt(tmp_path):
@@ -267,8 +276,13 @@ def test_sync_mma_kernel_codegen_validates_with_npuir_opt(tmp_path):
         expected_tokens=("suvm.copy_async", "suvm.tc.mma", "suvm.wait_token"),
     )
 
-    assert src.count("suvm.copy_async") >= 3
-    assert src.count("suvm.tc.mma") == 2
+    copy_lines = find_async_op_lines(src, "suvm.copy_async")
+    assert len(copy_lines) >= 3
+    assert {unit for unit in ("odma0", "odma1") if any(unit in line for line in copy_lines)} == {
+        "odma0",
+        "odma1",
+    }
+    assert len(find_async_op_lines(src, "suvm.tc.mma")) == 2
 
 
 def test_sync_if_broadcast_kernel_codegen_validates_with_npuir_opt(tmp_path):

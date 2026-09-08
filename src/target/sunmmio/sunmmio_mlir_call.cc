@@ -40,6 +40,18 @@ std::string MapMemoryScopeName(mlir::suvm::MemorySpace space) {
   TVM_FFI_UNREACHABLE();
 }
 
+template <typename OpType> void VerifyAsyncOp(OpType op, const char *callee) {
+  ICHECK(llvm::succeeded(op.verify()))
+      << callee << " generated an invalid SUVM operation";
+}
+
+template <typename OpType>
+void VerifyA4EMulticastOp(OpType op, const char *callee) {
+  VerifyAsyncOp(op, callee);
+  ICHECK(llvm::succeeded(op.verifyWithDeviceArch(mlir::suvm::DeviceArch::a4e)))
+      << callee << " violates A4E multicast data-path constraints";
+}
+
 SunMMIOType ConvertMemTensorType(mlir::suvm::MemTensorType memtensor_type,
                                  DataType dtype) {
   SunMMIOType type;
@@ -369,6 +381,19 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     LOG(FATAL) << arg_name << " is missing from attrs";
     TVM_FFI_UNREACHABLE();
   };
+  auto require_odma_unit = [&]() -> mlir::suvm::Unit {
+    std::optional<std::string> unit =
+        get_string_attr(SunMMIOCallAttrKey::kUnit);
+    ICHECK(unit.has_value()) << callee << " requires a resolved ODMA unit";
+    if (*unit == "odma0") {
+      return mlir::suvm::Unit::Odma0;
+    }
+    if (*unit == "odma1") {
+      return mlir::suvm::Unit::Odma1;
+    }
+    LOG(FATAL) << callee << " has unsupported ODMA unit " << *unit;
+    TVM_FFI_UNREACHABLE();
+  };
   auto ensure_static_barrier_for_mask = [&](int64_t mask) -> mlir::Value {
     ICHECK_GE(mask, 0) << "barrier participant_mask must be non-negative";
     auto it = ctx_.static_barrier_by_mask.find(mask);
@@ -582,9 +607,11 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     auto dst_ty = mlir::dyn_cast<mlir::suvm::TileViewType>(dst.getType());
     ICHECK(dst_ty) << "tl.dma_copy expects destination to be a suvm.tile_view";
 
+    mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
     auto copy_op = mlir::suvm::CopyAsyncOp::create(
-        ctx_.builder, type.MakeDebugLoc("dma_copy"), src, dst,
-        mlir::suvm::OdmaChannelAttr{});
+        ctx_.builder, type.MakeDebugLoc("dma_copy"), token_ty, src, dst,
+        require_odma_unit());
+    VerifyAsyncOp(copy_op, "tl.dma_copy");
 
     ICHECK(!result_name.empty()) << "tl.dma_copy expects a token result";
     ICHECK(copy_op && copy_op->getNumResults() == 1)
@@ -617,9 +644,11 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     ICHECK(dst_ty) << "tl.sunmmio_layout_transform expects destination to be a "
                       "suvm.tile_view";
 
+    mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
     auto transform_op = mlir::suvm::TransformAsyncOp::create(
-        ctx_.builder, type.MakeDebugLoc("sunmmio_layout_transform"), src, dst,
-        mlir::suvm::PadModeAttr{}, mlir::suvm::OdmaChannelAttr{});
+        ctx_.builder, type.MakeDebugLoc("sunmmio_layout_transform"), token_ty,
+        src, dst, mlir::suvm::PadModeAttr{}, require_odma_unit());
+    VerifyAsyncOp(transform_op, "tl.sunmmio_layout_transform");
 
     ICHECK(!result_name.empty())
         << "tl.sunmmio_layout_transform expects a token result";
@@ -653,9 +682,11 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     ICHECK(dst_ty)
         << "tl.sunmmio_transpose expects destination to be a suvm.tile_view";
 
+    mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
     auto transpose_op = mlir::suvm::TransposeAsyncOp::create(
-        ctx_.builder, type.MakeDebugLoc("sunmmio_transpose"), src, dst,
-        mlir::suvm::OdmaChannelAttr{});
+        ctx_.builder, type.MakeDebugLoc("sunmmio_transpose"), token_ty, src,
+        dst, require_odma_unit());
+    VerifyAsyncOp(transpose_op, "tl.sunmmio_transpose");
 
     ICHECK(!result_name.empty())
         << "tl.sunmmio_transpose expects a token result";
@@ -701,14 +732,11 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
                                              : mlir::suvm::McastDirection::col;
 
     auto create_mcast = [&]() -> mlir::Value {
+      mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
       auto mcast_op = mlir::suvm::MulticastTokOp::create(
-          ctx_.builder, type.MakeDebugLoc("broadcast"), src, dst, mask,
-          direction, mlir::suvm::OdmaChannelAttr{});
-      ICHECK(succeeded(mcast_op.verify()))
-          << "tl.broadcast_ generated an invalid suvm.mcast_tok";
-      ICHECK(
-          succeeded(mcast_op.verifyWithDeviceArch(mlir::suvm::DeviceArch::a4e)))
-          << "tl.broadcast_ violates A4E multicast data-path constraints";
+          ctx_.builder, type.MakeDebugLoc("broadcast"), token_ty, src, dst,
+          mask, direction, require_odma_unit());
+      VerifyA4EMulticastOp(mcast_op, "tl.broadcast_");
       return mcast_op->getResult(0);
     };
 
@@ -797,9 +825,10 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     mlir::UnitAttr trans_attr =
         trans_b ? ctx_.builder.getUnitAttr() : mlir::UnitAttr();
 
+    mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
     auto mma_op = mlir::suvm::TcMmaOp::create(
-        ctx_.builder, type.MakeDebugLoc("mma_sunmmio"), c, a, w, c, accumulate,
-        trans_attr);
+        ctx_.builder, type.MakeDebugLoc("mma_sunmmio"), token_ty, c, a, w, c,
+        accumulate, trans_attr);
 
     ICHECK(!result_name.empty()) << "tl.mma_sunmmio expects a token result";
     ICHECK(mma_op && mma_op->getNumResults() == 1)
