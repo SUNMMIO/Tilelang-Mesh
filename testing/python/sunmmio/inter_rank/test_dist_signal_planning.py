@@ -150,6 +150,24 @@ def all_signal_kinds_kernel_factory(M, N, world_size: int = 1):
     return main
 
 
+@tilelang.jit(target="sunmmio")
+def repeated_put_after_value_capacity_kernel_factory(world_size: int = 1):
+    @T.prim_func
+    def main(rank_id: T.dist.RankId):
+        with T.Kernel():
+            src = T.alloc_shared((32,), T.bfloat16)
+            dst = T.alloc_shared((32,), T.bfloat16)
+            reserved = T.dist.signals(32, kind=T.dist.SignalKind.SRAM_FLAGREG_VALUE)
+            signal = T.dist.signal()
+            peer_rank = (rank_id + 1) % world_size
+            T.dist.put(src, dst, dst_rank=peer_rank, signal=signal)
+            T.dist.put(src, dst, dst_rank=peer_rank, signal=signal)
+            T.dist.wait_all(reserved, dst=dst)
+            T.dist.wait_signal(signal, dst=dst)
+
+    return main
+
+
 def _single_prim_func(mod):
     funcs = [func for func in mod.functions.values() if isinstance(func, tvm.tir.PrimFunc)]
     assert len(funcs) == 1
@@ -176,6 +194,7 @@ def _collect_leaf_signals(func, op_name, kind_index_positions, expected_position
                 str(node.args[kind_position].value),
                 int(node.args[index_position]),
                 expected.buffer.name,
+                str(expected.dtype),
             )
         )
 
@@ -208,16 +227,16 @@ def test_plan_dist_signals_infers_kinds_and_preserves_independent_state():
 
     after_plan_func = _single_prim_func(result.pass_snapshot("tl.PlanDistSignals").mod)
     assert _signal_counts(after_plan_func) == {
-        "sram_flagreg_inc": 1,
+        "sram_flagreg_inc": 0,
         "dram_flagreg_inc": 1,
-        "sram_flagreg_value": 1,
+        "sram_flagreg_value": 2,
         "dram_flagreg_value": 0,
         "sram_memory": 0,
         "dram_memory": 1,
     }
     after_plan_script = after_plan_func.script()
     assert "T.dist_signal_decl" not in after_plan_script
-    assert 's0: T.handle = T.dist_signal("sram_flagreg_inc", 0)' in after_plan_script
+    assert 's0: T.handle = T.dist_signal("sram_flagreg_value", 1)' in after_plan_script
     assert 's1: T.handle = T.dist_signal("sram_flagreg_value", 0)' in after_plan_script
     assert 'd0: T.handle = T.dist_signal("dram_flagreg_inc", 0)' in after_plan_script
     assert 'm0: T.handle = T.dist_signal("dram_memory", 0)' in after_plan_script
@@ -226,31 +245,38 @@ def test_plan_dist_signals_infers_kinds_and_preserves_independent_state():
     assert _signal_counts(device_func) == _signal_counts(after_plan_func)
     puts = _collect_leaf_signals(device_func, "tl.dist_put_", (3, 4), 5)
     waits = _collect_leaf_signals(device_func, "tl.dist_wait_signal_", (0, 1), 2)
-    assert [(kind, index) for kind, index, _ in puts] == [
-        ("sram_flagreg_inc", 0),
+    assert [(kind, index) for kind, index, _, _ in puts] == [
+        ("sram_flagreg_value", 1),
         ("sram_flagreg_value", 0),
-        ("sram_flagreg_inc", 0),
+        ("sram_flagreg_value", 1),
         ("dram_flagreg_inc", 0),
         ("dram_memory", 0),
     ]
-    assert [(kind, index) for kind, index, _ in waits] == [
+    assert [(kind, index) for kind, index, _, _ in waits] == [
         ("sram_flagreg_value", 0),
-        ("sram_flagreg_inc", 0),
+        ("sram_flagreg_value", 1),
         ("dram_flagreg_inc", 0),
         ("dram_memory", 0),
     ]
 
-    expected_by_signal = {(kind, index): name for kind, index, name in waits}
-    generation_by_signal = {(kind, index): name for kind, index, name in puts}
+    expected_by_signal = {(kind, index): name for kind, index, name, _ in waits}
+    generation_by_signal = {(kind, index): name for kind, index, name, _ in puts}
+    state_dtype_by_signal = {(kind, index): dtype for kind, index, _, dtype in puts + waits}
     advances = _collect_generation_advances(device_func)
-    assert advances[generation_by_signal[("sram_flagreg_inc", 0)]] == 2
+    assert advances[generation_by_signal[("sram_flagreg_value", 1)]] == 2
     assert advances[generation_by_signal[("sram_flagreg_value", 0)]] == 1
     assert advances[generation_by_signal[("dram_flagreg_inc", 0)]] == 1
     assert advances[generation_by_signal[("dram_memory", 0)]] == 1
-    assert advances[expected_by_signal[("sram_flagreg_inc", 0)]] == 2
+    assert advances[expected_by_signal[("sram_flagreg_value", 1)]] == 2
     assert advances[expected_by_signal[("sram_flagreg_value", 0)]] == 1
     assert advances[expected_by_signal[("dram_flagreg_inc", 0)]] == 1
     assert advances[expected_by_signal[("dram_memory", 0)]] == 1
+    assert state_dtype_by_signal == {
+        ("sram_flagreg_value", 0): "uint32",
+        ("sram_flagreg_value", 1): "uint32",
+        ("dram_flagreg_inc", 0): "uint8",
+        ("dram_memory", 0): "uint32",
+    }
 
 
 def test_plan_dist_signals_rejects_mixed_destination_scopes():
@@ -286,6 +312,24 @@ def test_plan_dist_signals_resolves_all_six_explicit_kinds():
     script = planned.script()
     for kind in _signal_counts(planned):
         assert f'T.dist_signal("{kind}", 0)' in script
+
+
+def test_repeated_put_falls_back_to_sram_memory_after_value_capacity():
+    func = repeated_put_after_value_capacity_kernel_factory.get_tir(world_size=4)
+    result = lower_to_device_tir(func, capture_passes="tl.PlanDistSignals")
+    planned = _single_prim_func(result.pass_snapshot("tl.PlanDistSignals").mod)
+    assert _signal_counts(planned) == {
+        "sram_flagreg_inc": 0,
+        "dram_flagreg_inc": 0,
+        "sram_flagreg_value": 32,
+        "dram_flagreg_value": 0,
+        "sram_memory": 1,
+        "dram_memory": 0,
+    }
+    script = result.device_mod.script()
+    assert 'T.dist_put_(src[0:32], dst[0:32], (rank_id + 1) % 4, "sram_memory", 0' in script
+    assert 'T.dist_wait_signal_("sram_memory", 0' in script
+    assert "uint32" in script
 
 
 def test_plan_dist_signals_is_idempotent_after_resources_are_resolved():
