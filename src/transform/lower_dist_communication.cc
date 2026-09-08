@@ -50,10 +50,29 @@ private:
   struct SignalExpectation {
     PrimExpr signal;
     PrimExpr current_core;
+    const DistSignalKindInfo *kind;
     std::vector<std::vector<PrimExpr>> deltas;
     std::vector<std::vector<std::optional<std::pair<int64_t, int64_t>>>>
         senders;
   };
+
+  Stmt VisitStmt_(const LetStmtNode *op) final {
+    const auto *call = op->value.as<CallNode>();
+    if (!call || !call->op.same_as(dist_signal())) {
+      return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    }
+
+    ICHECK_EQ(call->args.size(), 2U);
+    const DistSignalKindInfo &kind =
+        RequireDistSignalKindInfo(call->args[0], "resolved signal kind");
+
+    // 递归遍历作用域，把signal对应的kind记录，并编码进新TIR
+    bool inserted = signal_kinds_.emplace(op->var.get(), &kind).second;
+    ICHECK(inserted) << "Duplicate T.dist signal definition " << op->var;
+    Stmt body = VisitStmt(op->body);
+    signal_kinds_.erase(op->var.get());
+    return LetStmt(op->var, op->value, body, op->span);
+  }
 
   int64_t RequireResolvedInt(const PrimExpr &expr, const char *name) {
     PrimExpr simplified = analyzer_->Simplify(expr);
@@ -139,6 +158,9 @@ private:
     ICHECK(signal_var) << "T.dist peer operation expects a signal Var";
     auto it = expectations->find(signal_var);
     if (it == expectations->end()) {
+      auto kind_it = signal_kinds_.find(signal_var);
+      ICHECK(kind_it != signal_kinds_.end())
+          << "Cannot find resolved T.dist signal kind for " << signal;
       std::vector<std::vector<PrimExpr>> deltas(
           world_size_, std::vector<PrimExpr>(mesh_nrows_, I32(0)));
       std::vector<std::vector<std::optional<std::pair<int64_t, int64_t>>>>
@@ -146,8 +168,9 @@ private:
                   std::vector<std::optional<std::pair<int64_t, int64_t>>>(
                       mesh_nrows_));
       it = expectations
-               ->emplace(signal_var, SignalExpectation{signal, current_core,
-                                                       deltas, senders})
+               ->emplace(signal_var,
+                         SignalExpectation{signal, current_core,
+                                           kind_it->second, deltas, senders})
                .first;
     }
     return it->second;
@@ -160,11 +183,14 @@ private:
     ICHECK_LT(dst_rank, world_size_);
     ICHECK_GE(dst_row, 0);
     ICHECK_LT(dst_row, mesh_nrows_);
-    if (!analyzer_->CanProve(Not(predicate))) {
+    // 检查VALUE/MEMORY signal是否出现了多个sender写入，然后构造sender的endpoint
+    if (!expectation->kind->allow_multi_sender &&
+        !analyzer_->CanProve(Not(predicate))) {
       auto &sender = expectation->senders[dst_rank][dst_row];
       std::pair<int64_t, int64_t> endpoint{src_rank, src_row};
       ICHECK(!sender || sender.value() == endpoint)
-          << "T.dist signal " << expectation->signal
+          << "T.dist " << expectation->kind->name << " signal "
+          << expectation->signal
           << " has multiple physical senders for receiver endpoint (rank="
           << dst_rank << ", row=" << dst_row
           << "). Use one independent signal per sender";
@@ -326,6 +352,7 @@ private:
   }
 
   bool suppress_injection_{false};
+  std::unordered_map<const VarNode *, const DistSignalKindInfo *> signal_kinds_;
 };
 
 class LowerDistPrimitiveMutator : public StmtExprMutator {
@@ -355,11 +382,15 @@ private:
 
     std::string expect_name = let_node->var->name_hint + "_expect";
     std::string generation_name = let_node->var->name_hint + "_generation";
-    Buffer expected = decl_buffer({IntImm(DataType::Int(32), 1)},
-                                  DataType::UInt(8), expect_name, "local.var");
-    Buffer generation =
-        decl_buffer({IntImm(DataType::Int(32), 1)}, DataType::UInt(8),
-                    generation_name, "local.var");
+    const DistSignalKindInfo &kind = RequireDistSignalKindInfo(
+        signal_call_node->args[0], "resolved signal kind");
+
+    // 选择正确的dtype
+    DataType state_dtype = kind.state_dtype;
+    Buffer expected = decl_buffer({IntImm(DataType::Int(32), 1)}, state_dtype,
+                                  expect_name, "local.var");
+    Buffer generation = decl_buffer({IntImm(DataType::Int(32), 1)}, state_dtype,
+                                    generation_name, "local.var");
     SignalInfo info{signal_call_node->args[0], signal_call_node->args[1],
                     expected, generation};
     signal_info_.emplace(let_node->var.get(), std::move(info));
@@ -373,7 +404,7 @@ private:
     Stmt scoped = DeclBuffer(expected, std::move(body));
     scoped = DeclBuffer(generation, std::move(scoped));
     Map<String, ffi::Any> annotations;
-    annotations.Set(tl::attr::kLocalVarInit, IntImm(DataType::UInt(8), 0));
+    annotations.Set(tl::attr::kLocalVarInit, IntImm(state_dtype, 0));
     scoped = Allocate(expected->data, expected->dtype, expected->shape,
                       const_true(), std::move(scoped), annotations);
     return Allocate(generation->data, generation->dtype, generation->shape,

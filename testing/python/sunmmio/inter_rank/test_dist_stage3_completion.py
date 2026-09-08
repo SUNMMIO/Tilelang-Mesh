@@ -418,7 +418,8 @@ def test_explicit_route_rejects_invalid_endpoints_and_duplicates(routes, message
         lower_to_device_tir(func)
 
 
-def test_one_signal_rejects_multiple_physical_senders():
+def test_default_inc_signal_allows_multiple_physical_senders():
     func = multiple_sender_one_signal_kernel_factory.get_tir(world_size=4)
-    with pytest.raises(tvm.error.InternalError, match="multiple physical senders"):
-        lower_to_device_tir(func)
+    result = lower_to_device_tir(func, capture_passes="tl.LowerDistCommunication")
+    script = result.pass_snapshot("tl.LowerDistCommunication").mod.script()
+    assert "T.Select(rank_id == 0, 3, 0)" in script
