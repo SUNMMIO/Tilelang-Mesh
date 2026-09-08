@@ -92,6 +92,17 @@ def ResolveSunmmioMeshSymbols():
     return _ffi_api.ResolveSunmmioMeshSymbols()  # type: ignore
 
 
+def ResolveSunmmioUnit():
+    """Attach the selected sending ODMA unit to Sunmmio transfer calls.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.ResolveSunmmioUnit()  # type: ignore
+
+
 def ValidateTileViewRegions():
     """ValidateTileViewRegions
 

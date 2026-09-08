@@ -40,32 +40,6 @@ std::string MapMemoryScopeName(mlir::suvm::MemorySpace space) {
   TVM_FFI_UNREACHABLE();
 }
 
-mlir::suvm::Unit SelectA4ECopyUnit(mlir::Value src, mlir::Value dst) {
-  using mlir::suvm::MemorySpace;
-  using mlir::suvm::Unit;
-
-  MemorySpace src_space = mlir::suvm::getTileViewMeta(src).memorySpace;
-  MemorySpace dst_space = mlir::suvm::getTileViewMeta(dst).memorySpace;
-  if (src_space == MemorySpace::global &&
-      (dst_space == MemorySpace::wsram || dst_space == MemorySpace::rsram)) {
-    return Unit::Odma0;
-  }
-  if (src_space == MemorySpace::rsram) {
-    if (dst_space == MemorySpace::global || dst_space == MemorySpace::wsram) {
-      return Unit::Odma0;
-    }
-    if (dst_space == MemorySpace::asram || dst_space == MemorySpace::rsram) {
-      // ODMA1 also covers strided RSRAM-to-RSRAM copies.
-      return Unit::Odma1;
-    }
-  }
-
-  LOG(FATAL) << "Unsupported A4E DMA copy path: "
-             << MapMemoryScopeName(src_space) << " -> "
-             << MapMemoryScopeName(dst_space);
-  TVM_FFI_UNREACHABLE();
-}
-
 template <typename OpType> void VerifyAsyncOp(OpType op, const char *callee) {
   ICHECK(llvm::succeeded(op.verify()))
       << callee << " generated an invalid SUVM operation";
@@ -407,6 +381,19 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     LOG(FATAL) << arg_name << " is missing from attrs";
     TVM_FFI_UNREACHABLE();
   };
+  auto require_odma_unit = [&]() -> mlir::suvm::Unit {
+    std::optional<std::string> unit =
+        get_string_attr(SunMMIOCallAttrKey::kUnit);
+    ICHECK(unit.has_value()) << callee << " requires a resolved ODMA unit";
+    if (*unit == "odma0") {
+      return mlir::suvm::Unit::Odma0;
+    }
+    if (*unit == "odma1") {
+      return mlir::suvm::Unit::Odma1;
+    }
+    LOG(FATAL) << callee << " has unsupported ODMA unit " << *unit;
+    TVM_FFI_UNREACHABLE();
+  };
   auto ensure_static_barrier_for_mask = [&](int64_t mask) -> mlir::Value {
     ICHECK_GE(mask, 0) << "barrier participant_mask must be non-negative";
     auto it = ctx_.static_barrier_by_mask.find(mask);
@@ -623,7 +610,7 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
     auto copy_op = mlir::suvm::CopyAsyncOp::create(
         ctx_.builder, type.MakeDebugLoc("dma_copy"), token_ty, src, dst,
-        SelectA4ECopyUnit(src, dst));
+        require_odma_unit());
     VerifyAsyncOp(copy_op, "tl.dma_copy");
 
     ICHECK(!result_name.empty()) << "tl.dma_copy expects a token result";
@@ -660,7 +647,7 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
     auto transform_op = mlir::suvm::TransformAsyncOp::create(
         ctx_.builder, type.MakeDebugLoc("sunmmio_layout_transform"), token_ty,
-        src, dst, mlir::suvm::PadModeAttr{}, mlir::suvm::Unit::Odma1);
+        src, dst, mlir::suvm::PadModeAttr{}, require_odma_unit());
     VerifyAsyncOp(transform_op, "tl.sunmmio_layout_transform");
 
     ICHECK(!result_name.empty())
@@ -698,7 +685,7 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
     auto transpose_op = mlir::suvm::TransposeAsyncOp::create(
         ctx_.builder, type.MakeDebugLoc("sunmmio_transpose"), token_ty, src,
-        dst, mlir::suvm::Unit::Odma1);
+        dst, require_odma_unit());
     VerifyAsyncOp(transpose_op, "tl.sunmmio_transpose");
 
     ICHECK(!result_name.empty())
@@ -746,12 +733,9 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
 
     auto create_mcast = [&]() -> mlir::Value {
       mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
-      mlir::suvm::Unit unit = direction == mlir::suvm::McastDirection::row
-                                  ? mlir::suvm::Unit::Odma1
-                                  : mlir::suvm::Unit::Odma0;
       auto mcast_op = mlir::suvm::MulticastTokOp::create(
           ctx_.builder, type.MakeDebugLoc("broadcast"), token_ty, src, dst,
-          mask, direction, unit);
+          mask, direction, require_odma_unit());
       VerifyA4EMulticastOp(mcast_op, "tl.broadcast_");
       return mcast_op->getResult(0);
     };

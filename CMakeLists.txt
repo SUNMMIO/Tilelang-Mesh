@@ -377,6 +377,7 @@ if(USE_SUNMMIO)
     src/target/sunmmio/sunmmio_mlir_tile_op.cc
     src/target/sunmmio/sunmmio_mlir_call.cc
     src/target/sunmmio/rt_mod_sunmmio.cc
+    src/target/sunmmio/resolve_sunmmio_unit.cc
   )
   list(APPEND TILE_LANG_SRCS ${TILE_LANG_SUNMMIO_SRCS})
 endif()

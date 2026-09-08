@@ -690,6 +690,21 @@ bool CodeGenTileLangSunMMIO::TryConsumeSyncTokenId(const tvm::PrimExpr &expr,
   return true;
 }
 
+bool CodeGenTileLangSunMMIO::TryConsumeSunmmioOdmaUnit(
+    const tvm::PrimExpr &expr, SunMMIOCallAttrs *attrs) {
+  std::optional<tl::SunmmioOdmaUnit> unit = tl::ParseSunmmioOdmaUnitExpr(expr);
+  if (!unit) {
+    return false;
+  }
+  MarkVisitedExprRoot(expr);
+  const auto *call = expr.as<tir::CallNode>();
+  ICHECK(call);
+  MarkVisitedExprRoot(call->args[0]);
+  (*attrs)[SunMMIOCallAttrKey::kUnit] =
+      std::string(tl::StringifySunmmioOdmaUnit(*unit));
+  return true;
+}
+
 void CodeGenTileLangSunMMIO::CollectExpectedCoverage(const tir::PrimFunc &f) {
   auto record = [](const ObjectRef &obj, CoverageData *coverage) {
     if (!obj.defined()) {
@@ -2857,9 +2872,9 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
       attrs[SunMMIOCallAttrKey::kCandidateMasks] = std::move(candidate_masks);
     }
   } else if (callee == "tl.dma_copy") {
-    ICHECK_EQ(op->args.size(), 4)
+    ICHECK_EQ(op->args.size(), 5)
         << "tl.dma_copy expects src region, dst region, src_offset_byte, "
-           "and sync_token_id";
+           "odma_unit, and sync_token_id";
     auto count_tiled_dims = [](const PrimExpr &region_expr) -> int {
       BufferRegion region = tl::NormalizeToBufferRegion(region_expr);
       int count = 0;
@@ -2886,15 +2901,17 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
 
     operands.reserve(2);
 
-    ICHECK(TryConsumeSyncTokenId(op->args[3], &attrs))
-        << "tl.dma_copy expects fourth argument to be tl.sync_token_id";
+    ICHECK(TryConsumeSunmmioOdmaUnit(op->args[3], &attrs))
+        << "tl.dma_copy expects fourth argument to be tl.odma_unit";
+    ICHECK(TryConsumeSyncTokenId(op->args[4], &attrs))
+        << "tl.dma_copy expects fifth argument to be tl.sync_token_id";
 
     operands.push_back(EmitRegionCall(op->args[0], src_offset_byte));
     operands.push_back(EmitRegionCall(op->args[1]));
   } else if (callee == "tl.sunmmio_layout_transform") {
-    ICHECK_EQ(op->args.size(), 3)
-        << "tl.sunmmio_layout_transform expects src region, dst region, and "
-           "sync_token_id";
+    ICHECK_EQ(op->args.size(), 4)
+        << "tl.sunmmio_layout_transform expects src region, dst region, "
+           "odma_unit, and sync_token_id";
     struct LayoutTransformRegionInfo {
       int rank{0};
       int tiled_dims{0};
@@ -2935,13 +2952,16 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
     operands.push_back(EmitRegionCall(op->args[0]));
     operands.push_back(EmitRegionCall(op->args[1]));
 
-    ICHECK(TryConsumeSyncTokenId(op->args[2], &attrs))
+    ICHECK(TryConsumeSunmmioOdmaUnit(op->args[2], &attrs))
         << "tl.sunmmio_layout_transform expects third argument to be "
+           "tl.odma_unit";
+    ICHECK(TryConsumeSyncTokenId(op->args[3], &attrs))
+        << "tl.sunmmio_layout_transform expects fourth argument to be "
            "tl.sync_token_id";
   } else if (callee == "tl.sunmmio_transpose") {
-    ICHECK_EQ(op->args.size(), 3)
-        << "tl.sunmmio_transpose expects src region, dst region, and "
-           "sync_token_id";
+    ICHECK_EQ(op->args.size(), 4)
+        << "tl.sunmmio_transpose expects src region, dst region, odma_unit, "
+           "and sync_token_id";
     auto validate_region = [](const PrimExpr &region_expr,
                               const char *operand) {
       BufferRegion region = tl::NormalizeToBufferRegion(region_expr);
@@ -2960,8 +2980,10 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
     operands.reserve(2);
     operands.push_back(EmitRegionCall(op->args[0]));
     operands.push_back(EmitRegionCall(op->args[1]));
-    ICHECK(TryConsumeSyncTokenId(op->args[2], &attrs))
-        << "tl.sunmmio_transpose expects third argument to be "
+    ICHECK(TryConsumeSunmmioOdmaUnit(op->args[2], &attrs))
+        << "tl.sunmmio_transpose expects third argument to be tl.odma_unit";
+    ICHECK(TryConsumeSyncTokenId(op->args[3], &attrs))
+        << "tl.sunmmio_transpose expects fourth argument to be "
            "tl.sync_token_id";
   } else if (callee == "tir.bitwise_and" || callee == "tir.bitwise_or" ||
              callee == "tir.bitwise_xor" || callee == "tir.shift_left" ||
@@ -2986,6 +3008,11 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
         non_token_args > 0 && TryConsumeSyncTokenId(op->args.back(), &attrs);
     ICHECK(has_sync_token)
         << "tl.broadcast_ expects last argument to be tl.sync_token_id";
+    --non_token_args;
+    ICHECK(non_token_args > 0 &&
+           TryConsumeSunmmioOdmaUnit(op->args[non_token_args - 1], &attrs))
+        << "tl.broadcast_ expects tl.odma_unit immediately before "
+           "tl.sync_token_id";
     --non_token_args;
     ICHECK(non_token_args == static_cast<size_t>(tl::kBroadcastArgCount) ||
            non_token_args == static_cast<size_t>(tl::kBroadcastArgCount + 1))
@@ -3066,6 +3093,9 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
     for (int i = 0, e = static_cast<int>(op->args.size()); i < e; ++i) {
       const PrimExpr &arg = op->args[i];
       if (TryConsumeSyncTokenId(arg, &attrs)) {
+        continue;
+      }
+      if (TryConsumeSunmmioOdmaUnit(arg, &attrs)) {
         continue;
       }
       if (const auto *s = arg.as<StringImmNode>()) {

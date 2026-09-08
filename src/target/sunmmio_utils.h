@@ -15,6 +15,7 @@
 #include <tvm/runtime/data_type.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/target/target.h>
+#include <tvm/tir/expr.h>
 
 namespace tvm {
 namespace tl {
@@ -76,6 +77,18 @@ enum class SunmmioTransferMechanism {
   kHLink,
   kVLink,
 };
+
+// Sending ODMA selected for an asynchronous Sunmmio transfer. Keep this
+// TileLang-side enum independent from NPU-IR's numeric enum representation.
+enum class SunmmioOdmaUnit {
+  kOdma0,
+  kOdma1,
+};
+
+const char *StringifySunmmioOdmaUnit(SunmmioOdmaUnit unit);
+PrimExpr MakeSunmmioOdmaUnitExpr(SunmmioOdmaUnit unit);
+std::optional<SunmmioOdmaUnit> ParseSunmmioOdmaUnitExpr(const PrimExpr &expr);
+std::optional<SunmmioOdmaUnit> GetSunmmioOdmaUnit(const tir::CallNode *call);
 
 SunmmioTileProcessorConfig
 GetSunmmioTileProcessorConfig(ffi::Optional<Target> target);

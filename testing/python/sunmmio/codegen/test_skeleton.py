@@ -23,9 +23,15 @@ def _primfunc_from_stmt(stmt):
     return _to_device_kernel_func(tvm.tir.PrimFunc([], stmt))
 
 
+def _resolve_transfer_units(mod, target):
+    mod = tvm.tir.transform.BindTarget(target)(mod)
+    return tilelang.transform.ResolveSunmmioUnit()(mod)
+
+
 def build_sunmmio_module_without_compile(func):
     target = determine_target("Sunmmio", return_object=True)
     mod = tvm.IRModule({"main": _to_device_kernel_func(func)})
+    mod = _resolve_transfer_units(mod, target)
     builder = tvm.ffi.get_global_func("target.build.tilelang_sunmmio_without_compile")
     return builder(mod, target, "suvm")
 
@@ -39,6 +45,7 @@ def build_sunmmio_source_without_compile(func):
 def build_sunmmio_source_from_stmt(stmt):
     target = determine_target("Sunmmio", return_object=True)
     mod = tvm.IRModule({"main": _primfunc_from_stmt(stmt)})
+    mod = _resolve_transfer_units(mod, target)
     builder = tvm.ffi.get_global_func("target.build.tilelang_sunmmio_without_compile")
     src = builder(mod, target, "suvm").inspect_source()
     print_sunmmio_codegen_debug(label="TVM Kernel", ir_obj=mod["main"], mlir_src=src)
@@ -468,9 +475,18 @@ def test_sunmmio_codegen_lowers_layout_transform():
     assert "sunmmio.fake" not in src
 
 
+def test_sunmmio_codegen_rejects_unresolved_odma_unit():
+    target = determine_target("Sunmmio", return_object=True)
+    mod = tvm.IRModule({"main": make_layout_transform_kernel()})
+    builder = tvm.ffi.get_global_func("target.build.tilelang_sunmmio_without_compile")
+    with pytest.raises(Exception, match="expects src region, dst region, odma_unit"):
+        builder(mod, target, "suvm")
+
+
 def test_sunmmio_codegen_module_verification_failure_fails_loudly():
     target = determine_target("Sunmmio", return_object=True)
     mod = tvm.IRModule({"main": make_invalid_dma_shape_kernel()})
+    mod = _resolve_transfer_units(mod, target)
     builder = tvm.ffi.get_global_func("target.build.tilelang_sunmmio_without_compile")
     with pytest.raises(Exception, match="SunMMIO MLIR module verification failed"):
         builder(mod, target, "suvm")
